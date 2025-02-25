@@ -20,11 +20,22 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@libsql/client": "^0.14.0",
+    "@types/bcrypt": "^5.0.0",
+    "@types/compression": "^1.7.5",
+    "@types/jsonwebtoken": "^9.0.3",
+    "@types/uuid": "^9.0.4",
+    "bcrypt": "^5.1.1",
+    "compression": "^1.8.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
+    "drizzle-orm": "^0.39.3",
     "express": "^4.21.1",
+    "express-rate-limit": "^7.5.0",
     "helmet": "^8.0.0",
-    "morgan": "^1.10.0"
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.0",
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
