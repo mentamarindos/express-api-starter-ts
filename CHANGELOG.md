@@ -46,6 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Production status tracking tests for monitoring manufacturing progress
   - Integration tests for all major API endpoints
 
+- Docker support:
+  - Multi-stage Dockerfile for optimal production builds
+  - Docker Compose configuration for development and production
+  - Volume management for persistent data
+  - Optional service configurations for Redis, Prometheus, and Grafana
+  - Development overrides for hot-reloading
+
 ### Changed
 
 - Updated project structure to support a modular architecture
