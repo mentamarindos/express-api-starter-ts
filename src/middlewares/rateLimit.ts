@@ -1,15 +1,17 @@
 import rateLimit from 'express-rate-limit';
-import { config } from '../config';
+import { formatJsonApiError } from '../utils/jsonApiFormatter';
 
 export const apiLimiter = rateLimit({
-  windowMs: config.rateLimit.windowMs,
-  max: config.rateLimit.max,
-  message: {
-    errors: [{
-      status: '429',
-      title: 'Too many requests',
-      detail: 'Please try again later'
-    }]
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per windowMs
+  handler: (req, res) => {
+    res.status(429).json(
+      formatJsonApiError(
+        '429',
+        'Too Many Requests',
+        'You have exceeded the rate limit. Please try again later.'
+      )
+    );
   },
   standardHeaders: true,
   legacyHeaders: false,

@@ -5,9 +5,14 @@ import { config } from '../config';
 export class AppError extends Error {
   statusCode: number;
   code?: string;
-  source?: { pointer: string };
+  source?: { pointer?: string; parameter?: string };
 
-  constructor(message: string, statusCode: number, code?: string, source?: { pointer: string }) {
+  constructor(
+    message: string,
+    statusCode: number,
+    code?: string,
+    source?: { pointer?: string; parameter?: string }
+  ) {
     super(message);
     this.statusCode = statusCode;
     this.code = code;
@@ -27,28 +32,26 @@ export const errorHandler = (
   res: Response,
   next: NextFunction
 ) => {
-  console.error(err);
+  console.error('Error:', err);
 
   if (err instanceof AppError) {
     return res.status(err.statusCode).json(
       formatJsonApiError(
-        err.code || err.statusCode.toString(),
+        String(err.statusCode),
         err.message,
-        config.nodeEnv === 'development' ? err.stack : undefined,
+        err.message,
+        err.code,
         err.source
       )
     );
   }
 
-  // Handle Drizzle or other specific errors here if needed
-
   // Default error
-  const statusCode = 500;
-  return res.status(statusCode).json(
+  return res.status(500).json(
     formatJsonApiError(
-      statusCode.toString(),
+      '500',
       'Internal Server Error',
-      config.nodeEnv === 'development' ? err.stack : undefined
+      process.env.NODE_ENV === 'development' ? err.message : 'An unexpected error occurred'
     )
   );
 };

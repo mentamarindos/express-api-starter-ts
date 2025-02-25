@@ -1,15 +1,28 @@
 import { Config } from '@libsql/client';
 import { config } from './index';
 
-export const getDatabaseConfig = (): Config => {
-  const { url, authToken } = config.database;
+export interface DatabaseConfig {
+  url: string;
+  authToken?: string;
+}
 
-  if (!url) {
-    throw new Error('Database URL is required');
+export function getDatabaseConfig(): DatabaseConfig {
+  const isDev = process.env.NODE_ENV === 'development';
+
+  // For development, use SQLite file
+  if (isDev) {
+    return {
+      url: process.env.DATABASE_URL || 'file:./db.sqlite',
+    };
+  }
+
+  // For production, require proper database URL and auth token
+  if (!process.env.DATABASE_URL) {
+    throw new Error('DATABASE_URL environment variable is required in production');
   }
 
   return {
-    url,
-    ...(authToken && { authToken }),
+    url: process.env.DATABASE_URL,
+    authToken: process.env.DATABASE_AUTH_TOKEN,
   };
-};
+}

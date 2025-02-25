@@ -5,8 +5,10 @@ import { initializeDatabase } from './db/schema';
 const startServer = async () => {
   try {
     await initializeDatabase();
+    
     app.listen(config.port, () => {
-      console.log(`Server running in ${config.nodeEnv} mode on port ${config.port}`);
+      console.log(`🚀 Server is running at http://localhost:${config.port}`);
+      console.log(`👻 Environment: ${config.nodeEnv}`);
     });
   } catch (error) {
     console.error('Failed to start server:', error);

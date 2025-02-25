@@ -3,8 +3,9 @@ import app from '../src/app';
 import { db, users } from '../src/db/schema';
 import { hashPassword } from '../src/utils/auth';
 
-describe('Auth endpoints', () => {
+describe('Authentication endpoints', () => {
   beforeEach(async () => {
+    // Clear users table before each test
     await db.delete(users);
   });
 
@@ -16,10 +17,10 @@ describe('Auth endpoints', () => {
           data: {
             type: 'users',
             attributes: {
-              email: 'test@example.com',
+              email: 'customer@example.com',
               password: 'password123',
-              firstName: 'Test',
-              lastName: 'User',
+              firstName: 'John',
+              lastName: 'Doe',
               role: 'customer'
             }
           }
@@ -30,7 +31,8 @@ describe('Auth endpoints', () => {
       expect(response.status).toBe(201);
       expect(response.body.data).toHaveProperty('id');
       expect(response.body.data.attributes).toHaveProperty('token');
-      expect(response.body.data.attributes.email).toBe('test@example.com');
+      expect(response.body.data.attributes.email).toBe('customer@example.com');
+      expect(response.body.data.attributes.role).toBe('customer');
     });
 
     it('should not allow registering as admin', async () => {
@@ -52,6 +54,46 @@ describe('Auth endpoints', () => {
         .set('Content-Type', 'application/vnd.api+json');
 
       expect(response.status).toBe(403);
+    });
+
+    it('should not allow duplicate email registration', async () => {
+      // First registration
+      await request(app)
+        .post('/api/auth/register')
+        .send({
+          data: {
+            type: 'users',
+            attributes: {
+              email: 'test@example.com',
+              password: 'password123',
+              firstName: 'Test',
+              lastName: 'User',
+              role: 'customer'
+            }
+          }
+        })
+        .set('Accept', 'application/vnd.api+json')
+        .set('Content-Type', 'application/vnd.api+json');
+
+      // Duplicate registration attempt
+      const response = await request(app)
+        .post('/api/auth/register')
+        .send({
+          data: {
+            type: 'users',
+            attributes: {
+              email: 'test@example.com',
+              password: 'differentpassword',
+              firstName: 'Another',
+              lastName: 'User',
+              role: 'customer'
+            }
+          }
+        })
+        .set('Accept', 'application/vnd.api+json')
+        .set('Content-Type', 'application/vnd.api+json');
+
+      expect(response.status).toBe(409);
     });
   });
 
@@ -102,6 +144,90 @@ describe('Auth endpoints', () => {
         })
         .set('Accept', 'application/vnd.api+json')
         .set('Content-Type', 'application/vnd.api+json');
+
+      expect(response.status).toBe(401);
+    });
+
+    it('should not login inactive user', async () => {
+      // Update user to inactive
+      await db.update(users)
+        .set({ isActive: false })
+        .where(eq(users.id, '1'));
+
+      const response = await request(app)
+        .post('/api/auth/login')
+        .send({
+          data: {
+            type: 'users',
+            attributes: {
+              email: 'test@example.com',
+              password: 'password123'
+            }
+          }
+        })
+        .set('Accept', 'application/vnd.api+json')
+        .set('Content-Type', 'application/vnd.api+json');
+
+      expect(response.status).toBe(401);
+    });
+  });
+
+  describe('GET /api/auth/profile', () => {
+    let authToken: string;
+
+    beforeEach(async () => {
+      // Create a user and get auth token
+      const passwordHash = await hashPassword('password123');
+      await db.insert(users).values({
+        id: '1',
+        email: 'test@example.com',
+        passwordHash,
+        firstName: 'Test',
+        lastName: 'User',
+        role: 'customer',
+        isActive: true
+      });
+
+      const loginResponse = await request(app)
+        .post('/api/auth/login')
+        .send({
+          data: {
+            type: 'users',
+            attributes: {
+              email: 'test@example.com',
+              password: 'password123'
+            }
+          }
+        })
+        .set('Accept', 'application/vnd.api+json')
+        .set('Content-Type', 'application/vnd.api+json');
+
+      authToken = loginResponse.body.data.attributes.token;
+    });
+
+    it('should get user profile with valid token', async () => {
+      const response = await request(app)
+        .get('/api/auth/profile')
+        .set('Authorization', `Bearer ${authToken}`)
+        .set('Accept', 'application/vnd.api+json');
+
+      expect(response.status).toBe(200);
+      expect(response.body.data.attributes.email).toBe('test@example.com');
+    });
+
+    it('should not get profile without token', async () => {
+      const response = await request(app)
+        .get('/api/auth/profile')
+        .set('Accept', 'application/vnd.api+json');
+
+      expect(response.status).toBe(401);
+    });
+
+    it('should not get profile with invalid token', async () => {
+      const response = await request(app)
+        .get('/api/auth/profile')
+        .set('Authorization', 'Bearer invalid-token')
+        .set('Accept', 'application/vnd.api+json');
 
       expect(response.status).toBe(401);
     });
