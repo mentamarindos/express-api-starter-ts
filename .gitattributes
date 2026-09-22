@@ -1,0 +1,2 @@
+# Normalize line endings: commit LF, avoid whole-file CRLF diffs
+* text=auto eol=lf
