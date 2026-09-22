@@ -75,3 +75,14 @@ export interface ProductionStatusInput {
   status: string;
   notes?: string;
 }
+
+// Shared response envelopes (formerly src/interfaces/)
+export interface MessageResponse {
+  message: string;
+}
+
+export interface ErrorResponse {
+  message: string;
+  stack?: string;
+  errors?: unknown[];
+}

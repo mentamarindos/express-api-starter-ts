@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { eq, and, sql } from 'drizzle-orm';
+import { eq, and, sql, type SQL } from 'drizzle-orm';
 import { db, productionStatus, contracts, quotes, quoteRequests, users, UserRole } from '../db/schema';
 import { generateUUID } from '../utils/auth';
 import { formatJsonApiResponse } from '../utils/jsonApiFormatter';
@@ -26,16 +26,20 @@ export const createProductionStatus = async (req: Request, res: Response) => {
       contract: contracts,
       quote: quotes,
     })
-    .from(contracts)
-    .where(eq(contracts.id, contractId))
-    .leftJoin(quotes, eq(contracts.quoteId, quotes.id))
-    .limit(1);
+      .from(contracts)
+      .where(eq(contracts.id, contractId))
+      .leftJoin(quotes, eq(contracts.quoteId, quotes.id))
+      .limit(1);
 
     if (contractResult.length === 0) {
       throw new AppError('Contract not found', 404);
     }
 
     const { contract, quote } = contractResult[0];
+
+    if (!quote || !contract) {
+      throw new AppError('Invalid data state: missing required relations', 500);
+    }
 
     if (quote.manufacturerId !== req.user.id) {
       throw new AppError('Access denied', 403);
@@ -73,14 +77,18 @@ export const createProductionStatus = async (req: Request, res: Response) => {
       quote: quotes,
       manufacturer: users,
     })
-    .from(productionStatus)
-    .where(eq(productionStatus.id, productionStatusId))
-    .leftJoin(contracts, eq(productionStatus.contractId, contracts.id))
-    .leftJoin(quotes, eq(contracts.quoteId, quotes.id))
-    .leftJoin(users, eq(quotes.manufacturerId, users.id))
-    .limit(1);
+      .from(productionStatus)
+      .where(eq(productionStatus.id, productionStatusId))
+      .leftJoin(contracts, eq(productionStatus.contractId, contracts.id))
+      .leftJoin(quotes, eq(contracts.quoteId, quotes.id))
+      .leftJoin(users, eq(quotes.manufacturerId, users.id))
+      .limit(1);
 
     const { status: createdStatus, contract: updatedContract, quote: updatedQuote, manufacturer } = result[0];
+
+    if (!updatedContract || !updatedQuote || !manufacturer) {
+      throw new AppError('Invalid data state: missing required relations', 500);
+    }
 
     return res.status(201).json(
       formatJsonApiResponse(
@@ -140,59 +148,99 @@ export const getProductionStatuses = async (req: Request, res: Response) => {
       throw new AppError('Authentication required', 401);
     }
 
-    let query = db.select({
+    // Build initial query
+    const baseQuery = db.select({
       status: productionStatus,
       contract: contracts,
       quote: quotes,
       quoteRequest: quoteRequests,
       manufacturer: users,
     })
-    .from(productionStatus)
-    .leftJoin(contracts, eq(productionStatus.contractId, contracts.id))
-    .leftJoin(quotes, eq(contracts.quoteId, quotes.id))
-    .leftJoin(quoteRequests, eq(quotes.quoteRequestId, quoteRequests.id))
-    .leftJoin(users, eq(quotes.manufacturerId, users.id));
+      .from(productionStatus)
+      .leftJoin(contracts, eq(productionStatus.contractId, contracts.id))
+      .leftJoin(quotes, eq(contracts.quoteId, quotes.id))
+      .leftJoin(quoteRequests, eq(quotes.quoteRequestId, quoteRequests.id))
+      .leftJoin(users, eq(quotes.manufacturerId, users.id));
+
+    // Build where conditions
+    const conditions: SQL[] = [];
 
     // Filter based on user role
     if (req.user.role === UserRole.MANUFACTURER) {
-      query = query.where(eq(quotes.manufacturerId, req.user.id));
+      conditions.push(eq(quotes.manufacturerId, req.user.id));
     } else if (req.user.role === UserRole.CUSTOMER) {
-      query = query.where(eq(quoteRequests.customerId, req.user.id));
+      conditions.push(eq(quoteRequests.customerId, req.user.id));
     }
 
     // Support filtering by contract
     if (req.query.contract_id) {
-      query = query.where(eq(productionStatus.contractId, req.query.contract_id as string));
+      conditions.push(eq(productionStatus.contractId, req.query.contract_id as string));
     }
 
     // Support filtering by status
     if (req.query.status) {
-      query = query.where(eq(productionStatus.status, req.query.status as string));
+      const status = req.query.status as 'ordered' | 'in_production' | 'completed' | 'shipped' | 'delivered';
+      conditions.push(eq(productionStatus.status, status));
     }
 
-    // Support sorting
+    // Build final query with conditions, sorting, and pagination
     const sortField = (req.query.sort as string) || '-createdAt';
     const sortDirection = sortField.startsWith('-') ? 'desc' : 'asc';
     const fieldName = sortField.replace(/^[+-]/, '');
-
-    if (fieldName === 'createdAt') {
-      query = query.orderBy(sortDirection === 'desc' ? 
-        sql`${productionStatus.createdAt} DESC` : 
-        sql`${productionStatus.createdAt} ASC`);
-    }
-
-    // Support pagination
     const page = parseInt(req.query.page as string) || 1;
     const pageSize = parseInt(req.query.page_size as string) || 10;
     const offset = (page - 1) * pageSize;
 
-    query = query.limit(pageSize).offset(offset);
+    // Build query with type preservation
+    type Query = typeof baseQuery;
+    let finalQuery: Query = baseQuery;
 
-    const results = await query;
+    // Apply filters
+    if (conditions.length > 0) {
+      const whereQuery = finalQuery.where(and(...conditions));
+      finalQuery = whereQuery as unknown as Query;
+    }
 
+    // Apply sorting
+    if (fieldName === 'createdAt') {
+      const sortQuery = finalQuery.orderBy(
+        sortDirection === 'desc' ? sql`${productionStatus.createdAt} DESC` : sql`${productionStatus.createdAt} ASC`
+      );
+      finalQuery = sortQuery as unknown as Query;
+    }
+
+    // Apply pagination
+    const paginatedQuery = finalQuery.limit(pageSize).offset(offset);
+    const results = await paginatedQuery;
+
+    interface QueryResult {
+      status: typeof productionStatus.$inferSelect;
+      contract: typeof contracts.$inferSelect | null;
+      quote: typeof quotes.$inferSelect | null;
+      quoteRequest: typeof quoteRequests.$inferSelect | null;
+      manufacturer: typeof users.$inferSelect | null;
+    }
+
+    // Validate and transform results with strong typing
+    interface ValidQueryResult extends QueryResult {
+      contract: NonNullable<typeof contracts.$inferSelect>;
+      quote: NonNullable<typeof quotes.$inferSelect>;
+      manufacturer: NonNullable<typeof users.$inferSelect>;
+    }
+
+    const validResults = results.filter((result): result is ValidQueryResult => {
+      const { contract, quote, manufacturer } = result;
+      return contract !== null && quote !== null && manufacturer !== null;
+    });
+
+    if (validResults.length !== results.length) {
+      throw new AppError('Invalid data state: missing required relations', 500);
+    }
+
+    // Now we can safely use non-null relations in the response
     return res.json(
       formatJsonApiResponse(
-        results.map(({ status, contract, quote, manufacturer }) => ({
+        validResults.map(({ status }) => ({
           type: 'production-status',
           id: status.id,
           attributes: {
@@ -207,7 +255,7 @@ export const getProductionStatuses = async (req: Request, res: Response) => {
             }
           }
         })),
-        results.flatMap(({ contract, quote, manufacturer }) => [
+        validResults.flatMap(({ contract, quote, manufacturer }) => [
           {
             type: 'contracts',
             id: contract.id,
@@ -257,13 +305,13 @@ export const getProductionStatusById = async (req: Request, res: Response) => {
       quoteRequest: quoteRequests,
       manufacturer: users,
     })
-    .from(productionStatus)
-    .where(eq(productionStatus.id, id))
-    .leftJoin(contracts, eq(productionStatus.contractId, contracts.id))
-    .leftJoin(quotes, eq(contracts.quoteId, quotes.id))
-    .leftJoin(quoteRequests, eq(quotes.quoteRequestId, quoteRequests.id))
-    .leftJoin(users, eq(quotes.manufacturerId, users.id))
-    .limit(1);
+      .from(productionStatus)
+      .where(eq(productionStatus.id, id))
+      .leftJoin(contracts, eq(productionStatus.contractId, contracts.id))
+      .leftJoin(quotes, eq(contracts.quoteId, quotes.id))
+      .leftJoin(quoteRequests, eq(quotes.quoteRequestId, quoteRequests.id))
+      .leftJoin(users, eq(quotes.manufacturerId, users.id))
+      .limit(1);
 
     if (result.length === 0) {
       throw new AppError('Production status not found', 404);
@@ -271,10 +319,14 @@ export const getProductionStatusById = async (req: Request, res: Response) => {
 
     const { status, contract, quote, quoteRequest, manufacturer } = result[0];
 
+    if (!contract || !quote || !manufacturer) {
+      throw new AppError('Invalid data state: missing required relations', 500);
+    }
+
     // Check permissions
     if (req.user.role === UserRole.MANUFACTURER && quote.manufacturerId !== req.user.id) {
       throw new AppError('Access denied', 403);
-    } else if (req.user.role === UserRole.CUSTOMER && quoteRequest.customerId !== req.user.id) {
+    } else if (req.user.role === UserRole.CUSTOMER && quoteRequest?.customerId !== req.user.id) {
       throw new AppError('Access denied', 403);
     }
 
@@ -345,18 +397,22 @@ export const updateProductionStatus = async (req: Request, res: Response) => {
       quote: quotes,
       quoteRequest: quoteRequests,
     })
-    .from(productionStatus)
-    .where(eq(productionStatus.id, id))
-    .leftJoin(contracts, eq(productionStatus.contractId, contracts.id))
-    .leftJoin(quotes, eq(contracts.quoteId, quotes.id))
-    .leftJoin(quoteRequests, eq(quotes.quoteRequestId, quoteRequests.id))
-    .limit(1);
+      .from(productionStatus)
+      .where(eq(productionStatus.id, id))
+      .leftJoin(contracts, eq(productionStatus.contractId, contracts.id))
+      .leftJoin(quotes, eq(contracts.quoteId, quotes.id))
+      .leftJoin(quoteRequests, eq(quotes.quoteRequestId, quoteRequests.id))
+      .limit(1);
 
     if (result.length === 0) {
       throw new AppError('Production status not found', 404);
     }
 
-    const { status: currentStatus, contract, quote, quoteRequest } = result[0];
+    const { contract, quote } = result[0];
+
+    if (!contract || !quote) {
+      throw new AppError('Invalid data state: missing required relations', 500);
+    }
 
     // Check permissions
     if (req.user.role === UserRole.MANUFACTURER && quote.manufacturerId !== req.user.id) {
@@ -398,14 +454,18 @@ export const updateProductionStatus = async (req: Request, res: Response) => {
       quote: quotes,
       manufacturer: users,
     })
-    .from(productionStatus)
-    .where(eq(productionStatus.id, id))
-    .leftJoin(contracts, eq(productionStatus.contractId, contracts.id))
-    .leftJoin(quotes, eq(contracts.quoteId, quotes.id))
-    .leftJoin(users, eq(quotes.manufacturerId, users.id))
-    .limit(1);
+      .from(productionStatus)
+      .where(eq(productionStatus.id, id))
+      .leftJoin(contracts, eq(productionStatus.contractId, contracts.id))
+      .leftJoin(quotes, eq(contracts.quoteId, quotes.id))
+      .leftJoin(users, eq(quotes.manufacturerId, users.id))
+      .limit(1);
 
     const { status: updatedStatus, contract: updatedContract, quote: updatedQuote, manufacturer } = updatedResult[0];
+
+    if (!updatedContract || !updatedQuote || !manufacturer) {
+      throw new AppError('Invalid data state: missing required relations', 500);
+    }
 
     return res.json(
       formatJsonApiResponse(
@@ -471,17 +531,21 @@ export const deleteProductionStatus = async (req: Request, res: Response) => {
       status: productionStatus,
       quote: quotes,
     })
-    .from(productionStatus)
-    .where(eq(productionStatus.id, id))
-    .leftJoin(contracts, eq(productionStatus.contractId, contracts.id))
-    .leftJoin(quotes, eq(contracts.quoteId, quotes.id))
-    .limit(1);
+      .from(productionStatus)
+      .where(eq(productionStatus.id, id))
+      .leftJoin(contracts, eq(productionStatus.contractId, contracts.id))
+      .leftJoin(quotes, eq(contracts.quoteId, quotes.id))
+      .limit(1);
 
     if (result.length === 0) {
       throw new AppError('Production status not found', 404);
     }
 
     const { quote } = result[0];
+    
+    if (!quote) {
+      throw new AppError('Invalid data state: missing quote relation', 500);
+    }
 
     // Only manufacturers can delete their production status updates
     if (req.user.role !== UserRole.MANUFACTURER || quote.manufacturerId !== req.user.id) {

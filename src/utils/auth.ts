@@ -28,7 +28,19 @@ export const generateToken = (user: {
     role: user.role,
   };
 
-  return jwt.sign(payload, config.jwtSecret, { expiresIn: config.jwtExpiresIn });
+  const secret = config.jwtSecret;
+  if (!secret) {
+    throw new Error('JWT secret is not configured');
+  }
+
+  return jwt.sign(
+    payload as jwt.JwtPayload, 
+    secret, 
+    { 
+      algorithm: 'HS256',
+      expiresIn: 86400 // 24 hours in seconds
+    }
+  );
 };
 
 export const verifyToken = (token: string): JwtPayload => {

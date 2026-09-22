@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { eq } from 'drizzle-orm';
 import { db, users, UserRole } from '../db/schema';
 import { hashPassword, comparePasswords, generateToken, generateUUID, sanitizeUserForResponse } from '../utils/auth';
-import { formatJsonApiResponse, formatJsonApiError } from '../utils/jsonApiFormatter';
+import { formatJsonApiResponse } from '../utils/jsonApiFormatter';
 import { AppError } from '../middlewares/errorHandler';
 
 export const register = async (req: Request, res: Response) => {
@@ -81,7 +81,7 @@ export const login = async (req: Request, res: Response) => {
     const token = generateToken({
       id: user.id,
       email: user.email,
-      role: user.role,
+      role: user.role as UserRole,
     });
 
     return res.json(
@@ -97,5 +97,30 @@ export const login = async (req: Request, res: Response) => {
   } catch (error) {
     if (error instanceof AppError) throw error;
     throw new AppError(`Login failed: ${(error as Error).message}`, 500);
+  }
+};
+
+export const getProfile = async (req: Request, res: Response) => {
+  try {
+    if (!req.user) {
+      throw new AppError('Authentication required', 401);
+    }
+
+    const userResults = await db.select().from(users).where(eq(users.id, req.user.id)).limit(1);
+
+    if (userResults.length === 0) {
+      throw new AppError('User not found', 404);
+    }
+
+    return res.json(
+      formatJsonApiResponse({
+        type: 'users',
+        id: userResults[0].id,
+        attributes: sanitizeUserForResponse(userResults[0]),
+      })
+    );
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw new AppError(`Failed to get profile: ${(error as Error).message}`, 500);
   }
 };

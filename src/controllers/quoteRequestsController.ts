@@ -1,9 +1,11 @@
 import { Request, Response } from 'express';
-import { eq, and, sql } from 'drizzle-orm';
+import { eq, and, desc, asc, type SQL } from 'drizzle-orm';
 import { db, quoteRequests, users, products, materials, openingTypes, profileTypes, notifications, UserRole } from '../db/schema';
 import { generateUUID } from '../utils/auth';
 import { formatJsonApiResponse } from '../utils/jsonApiFormatter';
 import { AppError } from '../middlewares/errorHandler';
+
+type QuoteRequestStatus = 'pending' | 'quoted' | 'accepted' | 'rejected' | 'completed';
 
 export const createQuoteRequest = async (req: Request, res: Response) => {
   try {
@@ -56,7 +58,7 @@ export const createQuoteRequest = async (req: Request, res: Response) => {
       height,
       quantity: quantity || 1,
       comments: comments || null,
-      status: 'pending',
+      status: 'pending' as const,
     };
 
     await db.insert(quoteRequests).values(newQuoteRequest);
@@ -90,15 +92,19 @@ export const createQuoteRequest = async (req: Request, res: Response) => {
       openingType: openingTypes,
       profileType: profileTypes,
     })
-    .from(quoteRequests)
-    .where(eq(quoteRequests.id, quoteRequestId))
-    .leftJoin(products, eq(quoteRequests.productId, products.id))
-    .leftJoin(materials, eq(quoteRequests.materialId, materials.id))
-    .leftJoin(openingTypes, eq(quoteRequests.openingTypeId, openingTypes.id))
-    .leftJoin(profileTypes, eq(quoteRequests.profileTypeId, profileTypes.id))
-    .limit(1);
+      .from(quoteRequests)
+      .where(eq(quoteRequests.id, quoteRequestId))
+      .leftJoin(products, eq(quoteRequests.productId, products.id))
+      .leftJoin(materials, eq(quoteRequests.materialId, materials.id))
+      .leftJoin(openingTypes, eq(quoteRequests.openingTypeId, openingTypes.id))
+      .leftJoin(profileTypes, eq(quoteRequests.profileTypeId, profileTypes.id))
+      .limit(1);
 
     const { quoteRequest, product: productData, material: materialData, openingType: openingTypeData, profileType: profileTypeData } = result[0];
+
+    if (!productData || !materialData || !openingTypeData || !profileTypeData) {
+      throw new AppError('Related data not found', 404);
+    }
 
     return res.status(201).json(
       formatJsonApiResponse(
@@ -181,7 +187,28 @@ export const getQuoteRequests = async (req: Request, res: Response) => {
       throw new AppError('Authentication required', 401);
     }
 
-    let query = db.select({
+    const conditions: SQL[] = [];
+    if (req.user.role === UserRole.CUSTOMER) {
+      conditions.push(eq(quoteRequests.customerId, req.user.id));
+    }
+
+    if (req.query.status) {
+      conditions.push(eq(quoteRequests.status, req.query.status as QuoteRequestStatus));
+    }
+
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
+    // Support sorting
+    const sortField = (req.query.sort as string) || '-createdAt';
+    const sortDirection = sortField.startsWith('-') ? 'desc' : 'asc';
+    const fieldName = sortField.replace(/^[+-]/, '');
+
+    // Support pagination
+    const page = parseInt(req.query.page as string) || 1;
+    const pageSize = parseInt(req.query.page_size as string) || 10;
+    const offset = (page - 1) * pageSize;
+
+    const query = db.select({
       quoteRequest: quoteRequests,
       product: products,
       material: materials,
@@ -189,50 +216,80 @@ export const getQuoteRequests = async (req: Request, res: Response) => {
       profileType: profileTypes,
       customer: users,
     })
-    .from(quoteRequests)
-    .leftJoin(products, eq(quoteRequests.productId, products.id))
-    .leftJoin(materials, eq(quoteRequests.materialId, materials.id))
-    .leftJoin(openingTypes, eq(quoteRequests.openingTypeId, openingTypes.id))
-    .leftJoin(profileTypes, eq(quoteRequests.profileTypeId, profileTypes.id))
-    .leftJoin(users, eq(quoteRequests.customerId, users.id));
-
-    // Filter based on user role
-    if (req.user.role === UserRole.CUSTOMER) {
-      query = query.where(eq(quoteRequests.customerId, req.user.id));
-    }
-
-    // Support filtering by status
-    if (req.query.status) {
-      query = query.where(eq(quoteRequests.status, req.query.status as string));
-    }
-
-    // Support sorting
-    const sortField = (req.query.sort as string) || '-createdAt';
-    const sortDirection = sortField.startsWith('-') ? 'desc' : 'asc';
-    const fieldName = sortField.replace(/^[+-]/, '');
-
-    if (fieldName === 'createdAt') {
-      query = query.orderBy(sortDirection === 'desc' ? 
-        sql`${quoteRequests.createdAt} DESC` : 
-        sql`${quoteRequests.createdAt} ASC`);
-    }
-
-    // Support pagination
-    const page = parseInt(req.query.page as string) || 1;
-    const pageSize = parseInt(req.query.page_size as string) || 10;
-    const offset = (page - 1) * pageSize;
-
-    const totalCount = await db.select({ count: sql`COUNT(*)` })
       .from(quoteRequests)
-      .where(req.user.role === UserRole.CUSTOMER ? eq(quoteRequests.customerId, req.user.id) : undefined);
+      .leftJoin(products, eq(quoteRequests.productId, products.id))
+      .leftJoin(materials, eq(quoteRequests.materialId, materials.id))
+      .leftJoin(openingTypes, eq(quoteRequests.openingTypeId, openingTypes.id))
+      .leftJoin(profileTypes, eq(quoteRequests.profileTypeId, profileTypes.id))
+      .leftJoin(users, eq(quoteRequests.customerId, users.id))
+      .where(whereClause)
+      .limit(pageSize)
+      .offset(offset);
 
-    query = query.limit(pageSize).offset(offset);
+    // Only add orderBy if it's a valid field
+    if (fieldName === 'createdAt') {
+      query.orderBy(sortDirection === 'desc' ? desc(quoteRequests.createdAt) : asc(quoteRequests.createdAt));
+    }
 
     const results = await query;
 
-    return res.json(
-      formatJsonApiResponse(
-        results.map(({ quoteRequest, product, material, openingType, profileType, customer }) => ({
+    const formattedResults = results.map(({ quoteRequest, product, material, openingType, profileType, customer }) => {
+      // Ensure all required related entities exist
+      if (!product || !material || !openingType || !profileType) {
+        throw new AppError('Required related data not found', 404);
+      }
+
+      const includes = [
+        {
+          type: 'products',
+          id: product.id,
+          attributes: {
+            name: product.name,
+            category: product.category,
+            description: product.description
+          }
+        },
+        {
+          type: 'materials',
+          id: material.id,
+          attributes: {
+            name: material.name,
+            description: material.description
+          }
+        },
+        {
+          type: 'opening-types',
+          id: openingType.id,
+          attributes: {
+            name: openingType.name,
+            description: openingType.description
+          }
+        },
+        {
+          type: 'profile-types',
+          id: profileType.id,
+          attributes: {
+            name: profileType.name,
+            description: profileType.description
+          }
+        }
+      ];
+
+      // Only include customer details if we're not a customer and the customer exists
+      if (req.user?.role !== UserRole.CUSTOMER && customer) {
+        includes.push({
+          type: 'users',
+          id: customer.id,
+          attributes: {
+            name: `${customer.firstName} ${customer.lastName}`,
+            description: customer.email,
+            category: 'customer'
+          }
+        });
+      }
+
+      return formatJsonApiResponse(
+        {
           type: 'quote-requests',
           id: quoteRequest.id,
           attributes: {
@@ -242,7 +299,7 @@ export const getQuoteRequests = async (req: Request, res: Response) => {
             comments: quoteRequest.comments,
             status: quoteRequest.status,
             createdAt: quoteRequest.createdAt,
-            updatedAt: quoteRequest.updatedAt,
+            updatedAt: quoteRequest.updatedAt
           },
           relationships: {
             customer: {
@@ -261,56 +318,12 @@ export const getQuoteRequests = async (req: Request, res: Response) => {
               data: { type: 'profile-types', id: quoteRequest.profileTypeId }
             }
           }
-        })),
-        results.flatMap(({ product, material, openingType, profileType, customer }) => [
-          {
-            type: 'products',
-            id: product.id,
-            attributes: {
-              name: product.name,
-              category: product.category,
-              description: product.description,
-            }
-          },
-          {
-            type: 'materials',
-            id: material.id,
-            attributes: {
-              name: material.name,
-              description: material.description,
-            }
-          },
-          {
-            type: 'opening-types',
-            id: openingType.id,
-            attributes: {
-              name: openingType.name,
-              description: openingType.description,
-            }
-          },
-          {
-            type: 'profile-types',
-            id: profileType.id,
-            attributes: {
-              name: profileType.name,
-              description: profileType.description,
-            }
-          },
-          // Only include customer details for admins and manufacturers
-          ...(req.user.role !== UserRole.CUSTOMER ? [
-            {
-              type: 'users',
-              id: customer.id,
-              attributes: {
-                firstName: customer.firstName,
-                lastName: customer.lastName,
-                email: customer.email,
-              }
-            }
-          ] : [])
-        ])
-      )
-    );
+        },
+        includes
+      );
+    });
+
+    return res.json({ data: formattedResults });
   } catch (error) {
     if (error instanceof AppError) throw error;
     throw new AppError(`Failed to get quote requests: ${(error as Error).message}`, 500);
@@ -333,14 +346,14 @@ export const getQuoteRequestById = async (req: Request, res: Response) => {
       profileType: profileTypes,
       customer: users,
     })
-    .from(quoteRequests)
-    .where(eq(quoteRequests.id, id))
-    .leftJoin(products, eq(quoteRequests.productId, products.id))
-    .leftJoin(materials, eq(quoteRequests.materialId, materials.id))
-    .leftJoin(openingTypes, eq(quoteRequests.openingTypeId, openingTypes.id))
-    .leftJoin(profileTypes, eq(quoteRequests.profileTypeId, profileTypes.id))
-    .leftJoin(users, eq(quoteRequests.customerId, users.id))
-    .limit(1);
+      .from(quoteRequests)
+      .where(eq(quoteRequests.id, id))
+      .leftJoin(products, eq(quoteRequests.productId, products.id))
+      .leftJoin(materials, eq(quoteRequests.materialId, materials.id))
+      .leftJoin(openingTypes, eq(quoteRequests.openingTypeId, openingTypes.id))
+      .leftJoin(profileTypes, eq(quoteRequests.profileTypeId, profileTypes.id))
+      .leftJoin(users, eq(quoteRequests.customerId, users.id))
+      .limit(1);
 
     if (result.length === 0) {
       throw new AppError('Quote request not found', 404);
@@ -352,6 +365,24 @@ export const getQuoteRequestById = async (req: Request, res: Response) => {
     if (req.user.role === UserRole.CUSTOMER && quoteRequest.customerId !== req.user.id) {
       throw new AppError('Access denied', 403);
     }
+
+    // Ensure all required related entities exist
+    if (!product || !material || !openingType || !profileType) {
+      throw new AppError('Required related data not found', 404);
+    }
+
+    // Check if customer exists before accessing its properties
+    const customerInclude = customer && req.user.role !== UserRole.CUSTOMER ? [
+      {
+        type: 'users',
+        id: customer.id,
+        attributes: {
+          name: `${customer.firstName} ${customer.lastName}`,
+          description: customer.email,
+          category: 'customer'
+        }
+      }
+    ] : [];
 
     return res.json(
       formatJsonApiResponse(
@@ -420,17 +451,7 @@ export const getQuoteRequestById = async (req: Request, res: Response) => {
             }
           },
           // Only include customer details for admins and manufacturers
-          ...(req.user.role !== UserRole.CUSTOMER ? [
-            {
-              type: 'users',
-              id: customer.id,
-              attributes: {
-                firstName: customer.firstName,
-                lastName: customer.lastName,
-                email: customer.email,
-              }
-            }
-          ] : [])
+          ...customerInclude
         ]
       )
     );
@@ -536,15 +557,20 @@ export const updateQuoteRequest = async (req: Request, res: Response) => {
       openingType: openingTypes,
       profileType: profileTypes,
     })
-    .from(quoteRequests)
-    .where(eq(quoteRequests.id, id))
-    .leftJoin(products, eq(quoteRequests.productId, products.id))
-    .leftJoin(materials, eq(quoteRequests.materialId, materials.id))
-    .leftJoin(openingTypes, eq(quoteRequests.openingTypeId, openingTypes.id))
-    .leftJoin(profileTypes, eq(quoteRequests.profileTypeId, profileTypes.id))
-    .limit(1);
+      .from(quoteRequests)
+      .where(eq(quoteRequests.id, id))
+      .leftJoin(products, eq(quoteRequests.productId, products.id))
+      .leftJoin(materials, eq(quoteRequests.materialId, materials.id))
+      .leftJoin(openingTypes, eq(quoteRequests.openingTypeId, openingTypes.id))
+      .leftJoin(profileTypes, eq(quoteRequests.profileTypeId, profileTypes.id))
+      .limit(1);
 
     const { quoteRequest: updatedQuoteRequest, product, material, openingType, profileType } = result[0];
+
+    // Ensure all required related entities exist
+    if (!product || !material || !openingType || !profileType) {
+      throw new AppError('Required related data not found', 404);
+    }
 
     return res.json(
       formatJsonApiResponse(

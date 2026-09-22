@@ -1,10 +1,11 @@
 import { Request, Response, NextFunction } from 'express';
 import { formatJsonApiError } from '../utils/jsonApiFormatter';
-import { config } from '../config';
 
 export class AppError extends Error {
   statusCode: number;
+
   code?: string;
+
   source?: { pointer?: string; parameter?: string };
 
   constructor(
@@ -30,6 +31,8 @@ export const errorHandler = (
   err: Error | AppError,
   req: Request,
   res: Response,
+  // Express only treats 4-argument functions as error handlers
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   next: NextFunction
 ) => {
   console.error('Error:', err);

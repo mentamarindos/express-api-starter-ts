@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { eq, and, sql } from 'drizzle-orm';
+import { eq, and, sql, desc, asc, type SQL } from 'drizzle-orm';
 import { db, quotes, quoteRequests, users, notifications, UserRole } from '../db/schema';
 import { generateUUID } from '../utils/auth';
 import { formatJsonApiResponse } from '../utils/jsonApiFormatter';
@@ -62,7 +62,7 @@ export const createQuote = async (req: Request, res: Response) => {
       deliveryTimeInDays,
       validUntil,
       additionalNotes: additionalNotes || null,
-      status: 'pending',
+      status: 'pending' as const, // Fix type safety for status
     };
 
     await db.insert(quotes).values(newQuote);
@@ -92,13 +92,16 @@ export const createQuote = async (req: Request, res: Response) => {
       quoteRequest: quoteRequests,
       manufacturer: users,
     })
-    .from(quotes)
-    .where(eq(quotes.id, quoteId))
-    .leftJoin(quoteRequests, eq(quotes.quoteRequestId, quoteRequests.id))
-    .leftJoin(users, eq(quotes.manufacturerId, users.id))
-    .limit(1);
+      .from(quotes)
+      .where(eq(quotes.id, quoteId))
+      .leftJoin(quoteRequests, eq(quotes.quoteRequestId, quoteRequests.id))
+      .leftJoin(users, eq(quotes.manufacturerId, users.id))
+      .limit(1);
 
     const { quote, quoteRequest: updatedQuoteRequest, manufacturer } = result[0];
+    if (!updatedQuoteRequest || !manufacturer) {
+      throw new AppError('Related data not found', 500);
+    }
 
     return res.status(201).json(
       formatJsonApiResponse(
@@ -158,116 +161,148 @@ export const getQuotes = async (req: Request, res: Response) => {
       throw new AppError('Authentication required', 401);
     }
 
-    let query = db.select({
+    // Build the where conditions array
+    const conditions: SQL[] = [];
+    
+    if (req.user.role === UserRole.MANUFACTURER) {
+      conditions.push(eq(quotes.manufacturerId, req.user.id));
+    } else if (req.user.role === UserRole.CUSTOMER) {
+      conditions.push(eq(quoteRequests.customerId, req.user.id));
+    }
+
+    if (req.query.quote_request_id) {
+      conditions.push(eq(quotes.quoteRequestId, req.query.quote_request_id as string));
+    }
+
+    if (req.query.status && ['pending', 'accepted', 'rejected'].includes(req.query.status as string)) {
+      conditions.push(eq(quotes.status, req.query.status as 'pending' | 'accepted' | 'rejected'));
+    }
+
+    // Build the query
+    const baseQuery = db.select({
       quote: quotes,
       quoteRequest: quoteRequests,
       manufacturer: users,
     })
-    .from(quotes)
-    .leftJoin(quoteRequests, eq(quotes.quoteRequestId, quoteRequests.id))
-    .leftJoin(users, eq(quotes.manufacturerId, users.id));
+      .from(quotes)
+      .leftJoin(quoteRequests, eq(quotes.quoteRequestId, quoteRequests.id))
+      .leftJoin(users, eq(quotes.manufacturerId, users.id))
+      .where(and(...conditions));
 
-    // Filter based on user role
-    if (req.user.role === UserRole.MANUFACTURER) {
-      query = query.where(eq(quotes.manufacturerId, req.user.id));
-    } else if (req.user.role === UserRole.CUSTOMER) {
-      query = query.where(eq(quoteRequests.customerId, req.user.id));
+    // Fix sorting by using the quotes table columns directly
+    type ValidSortFields = keyof typeof quotes | undefined;
+    const sortField = req.query.sort_by as ValidSortFields || 'createdAt';
+
+    let orderByClause: SQL;
+    switch (sortField) {
+      case 'createdAt':
+        orderByClause = req.query.sort_direction === 'asc' ? asc(quotes.createdAt) : desc(quotes.createdAt);
+        break;
+      case 'updatedAt':
+        orderByClause = req.query.sort_direction === 'asc' ? asc(quotes.updatedAt) : desc(quotes.updatedAt);
+        break;
+      case 'price':
+        orderByClause = req.query.sort_direction === 'asc' ? asc(quotes.price) : desc(quotes.price);
+        break;
+      case 'deliveryTimeInDays':
+        orderByClause = req.query.sort_direction === 'asc' ? asc(quotes.deliveryTimeInDays) : desc(quotes.deliveryTimeInDays);
+        break;
+      case 'validUntil':
+        orderByClause = req.query.sort_direction === 'asc' ? asc(quotes.validUntil) : desc(quotes.validUntil);
+        break;
+      case 'status':
+        orderByClause = req.query.sort_direction === 'asc' ? asc(quotes.status) : desc(quotes.status);
+        break;
+      default:
+        orderByClause = desc(quotes.createdAt);
     }
 
-    // Support filtering by quote request
-    if (req.query.quote_request_id) {
-      query = query.where(eq(quotes.quoteRequestId, req.query.quote_request_id as string));
-    }
+    const query = baseQuery.orderBy(orderByClause);
 
-    // Support filtering by status
-    if (req.query.status) {
-      query = query.where(eq(quotes.status, req.query.status as string));
-    }
-
-    // Support sorting
-    const sortField = (req.query.sort as string) || '-createdAt';
-    const sortDirection = sortField.startsWith('-') ? 'desc' : 'asc';
-    const fieldName = sortField.replace(/^[+-]/, '');
-
-    if (fieldName === 'createdAt') {
-      query = query.orderBy(sortDirection === 'desc' ? 
-        sql`${quotes.createdAt} DESC` : 
-        sql`${quotes.createdAt} ASC`);
-    } else if (fieldName === 'price') {
-      query = query.orderBy(sortDirection === 'desc' ? 
-        sql`${quotes.price} DESC` : 
-        sql`${quotes.price} ASC`);
-    }
-
-    // Support pagination
+    // Apply pagination
     const page = parseInt(req.query.page as string) || 1;
-    const pageSize = parseInt(req.query.page_size as string) || 10;
+    const pageSize = Math.min(parseInt(req.query.page_size as string) || 10, 100);
     const offset = (page - 1) * pageSize;
 
-    const totalCount = await db.select({ count: sql`COUNT(*)` })
-      .from(quotes)
-      .where(
-        and(
-          req.user.role === UserRole.MANUFACTURER ? eq(quotes.manufacturerId, req.user.id) : undefined,
-          req.user.role === UserRole.CUSTOMER ? 
-            eq(quoteRequests.customerId, req.user.id) : undefined,
-          req.query.quote_request_id ? 
-            eq(quotes.quoteRequestId, req.query.quote_request_id as string) : undefined,
-          req.query.status ? 
-            eq(quotes.status, req.query.status as string) : undefined
-        )
-      );
+    const results = await query.limit(pageSize).offset(offset);
 
-    query = query.limit(pageSize).offset(offset);
+    // Add null checks in getQuotes response formatting
+    const formattedQuotes = results.map(({ quote, quoteRequest, manufacturer }) => {
+      if (!quote || !quoteRequest || !manufacturer) {
+        throw new AppError('Invalid data retrieved from database', 500);
+      }
 
-    const results = await query;
+      return {
+        type: 'quotes',
+        id: quote.id,
+        attributes: {
+          price: quote.price,
+          deliveryTimeInDays: quote.deliveryTimeInDays,
+          validUntil: quote.validUntil,
+          additionalNotes: quote.additionalNotes,
+          status: quote.status,
+          createdAt: quote.createdAt,
+          updatedAt: quote.updatedAt,
+        },
+        relationships: {
+          quoteRequest: {
+            data: { 
+              type: 'quote-requests', 
+              id: quoteRequest.id,
+              attributes: {
+                status: quoteRequest.status,
+                width: quoteRequest.width,
+                height: quoteRequest.height,
+                quantity: quoteRequest.quantity,
+              }
+            }
+          },
+          manufacturer: {
+            data: { 
+              type: 'users', 
+              id: manufacturer.id,
+              attributes: {
+                firstName: manufacturer.firstName,
+                lastName: manufacturer.lastName,
+                companyName: manufacturer.companyName,
+              }
+            }
+          }
+        }
+      };
+    });
 
-    return res.json(
-      formatJsonApiResponse(
-        results.map(({ quote, quoteRequest, manufacturer }) => ({
-          type: 'quotes',
-          id: quote.id,
+    // Add null checks for included relationships
+    const included = results.flatMap(({ quoteRequest, manufacturer }) => {
+      if (!quoteRequest || !manufacturer) {
+        throw new AppError('Invalid data retrieved from database', 500);
+      }
+
+      return [
+        {
+          type: 'quote-requests',
+          id: quoteRequest.id,
           attributes: {
-            price: quote.price,
-            deliveryTimeInDays: quote.deliveryTimeInDays,
-            validUntil: quote.validUntil,
-            additionalNotes: quote.additionalNotes,
-            status: quote.status,
-            createdAt: quote.createdAt,
-            updatedAt: quote.updatedAt,
-          },
-          relationships: {
-            quoteRequest: {
-              data: { type: 'quote-requests', id: quote.quoteRequestId }
-            },
-            manufacturer: {
-              data: { type: 'users', id: quote.manufacturerId }
-            }
+            status: quoteRequest.status,
+            width: quoteRequest.width,
+            height: quoteRequest.height,
+            quantity: quoteRequest.quantity,
           }
-        })),
-        results.flatMap(({ quoteRequest, manufacturer }) => [
-          {
-            type: 'quote-requests',
-            id: quoteRequest.id,
-            attributes: {
-              status: quoteRequest.status,
-              width: quoteRequest.width,
-              height: quoteRequest.height,
-              quantity: quoteRequest.quantity,
-            }
-          },
-          {
-            type: 'users',
-            id: manufacturer.id,
-            attributes: {
-              firstName: manufacturer.firstName,
-              lastName: manufacturer.lastName,
-              companyName: manufacturer.companyName,
-            }
+        },
+        {
+          type: 'users',
+          id: manufacturer.id,
+          attributes: {
+            firstName: manufacturer.firstName,
+            lastName: manufacturer.lastName,
+            companyName: manufacturer.companyName,
           }
-        ])
-      )
-    );
+        }
+      ];
+    });
+
+    return res.json(formatJsonApiResponse(formattedQuotes, included));
+
   } catch (error) {
     if (error instanceof AppError) throw error;
     throw new AppError(`Failed to get quotes: ${(error as Error).message}`, 500);
@@ -287,17 +322,20 @@ export const getQuoteById = async (req: Request, res: Response) => {
       quoteRequest: quoteRequests,
       manufacturer: users,
     })
-    .from(quotes)
-    .where(eq(quotes.id, id))
-    .leftJoin(quoteRequests, eq(quotes.quoteRequestId, quoteRequests.id))
-    .leftJoin(users, eq(quotes.manufacturerId, users.id))
-    .limit(1);
+      .from(quotes)
+      .where(eq(quotes.id, id))
+      .leftJoin(quoteRequests, eq(quotes.quoteRequestId, quoteRequests.id))
+      .leftJoin(users, eq(quotes.manufacturerId, users.id))
+      .limit(1);
 
     if (result.length === 0) {
       throw new AppError('Quote not found', 404);
     }
 
     const { quote, quoteRequest, manufacturer } = result[0];
+    if (!quote || !quoteRequest || !manufacturer) {
+      throw new AppError('Invalid data retrieved from database', 500);
+    }
 
     // Check permissions
     if (req.user.role === UserRole.MANUFACTURER && quote.manufacturerId !== req.user.id) {
@@ -461,13 +499,16 @@ export const updateQuote = async (req: Request, res: Response) => {
       quoteRequest: quoteRequests,
       manufacturer: users,
     })
-    .from(quotes)
-    .where(eq(quotes.id, id))
-    .leftJoin(quoteRequests, eq(quotes.quoteRequestId, quoteRequests.id))
-    .leftJoin(users, eq(quotes.manufacturerId, users.id))
-    .limit(1);
+      .from(quotes)
+      .where(eq(quotes.id, id))
+      .leftJoin(quoteRequests, eq(quotes.quoteRequestId, quoteRequests.id))
+      .leftJoin(users, eq(quotes.manufacturerId, users.id))
+      .limit(1);
 
     const { quote: updatedQuote, quoteRequest, manufacturer } = result[0];
+    if (!updatedQuote || !quoteRequest || !manufacturer) {
+      throw new AppError('Invalid data retrieved from database', 500);
+    }
 
     return res.json(
       formatJsonApiResponse(

@@ -4,7 +4,6 @@ import { db, users, UserRole } from '../db/schema';
 import { hashPassword, sanitizeUserForResponse } from '../utils/auth';
 import { formatJsonApiResponse } from '../utils/jsonApiFormatter';
 import { AppError } from '../middlewares/errorHandler';
-import { UserData } from '../types';
 
 interface UserUpdateAttributes {
   firstName?: string;
@@ -25,7 +24,7 @@ export const getAllUsers = async (req: Request, res: Response) => {
     const userResults = await db.select().from(users);
     return res.json(
       formatJsonApiResponse(
-        userResults.map((user: UserData) => ({
+        userResults.map((user) => ({
           type: 'users',
           id: user.id,
           attributes: sanitizeUserForResponse(user),
