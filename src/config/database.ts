@@ -1,28 +1,10 @@
-import { Config } from '@libsql/client';
-import { config } from './index';
+import 'dotenv/config';
+import Database from 'better-sqlite3';
+import { drizzle } from 'drizzle-orm/better-sqlite3';
 
-export interface DatabaseConfig {
-  url: string;
-  authToken?: string;
-}
+// Accept both "file:./db.sqlite" and plain paths from DATABASE_URL
+const dbPath = (process.env.DATABASE_URL || './database.db').replace(/^file:/, '');
 
-export function getDatabaseConfig(): DatabaseConfig {
-  const isDev = process.env.NODE_ENV === 'development';
-
-  // For development, use SQLite file
-  if (isDev) {
-    return {
-      url: process.env.DATABASE_URL || 'file:./db.sqlite',
-    };
-  }
-
-  // For production, require proper database URL and auth token
-  if (!process.env.DATABASE_URL) {
-    throw new Error('DATABASE_URL environment variable is required in production');
-  }
-
-  return {
-    url: process.env.DATABASE_URL,
-    authToken: process.env.DATABASE_AUTH_TOKEN,
-  };
-}
+// Initialize database
+const sqlite = new Database(dbPath);
+export const db = drizzle(sqlite);

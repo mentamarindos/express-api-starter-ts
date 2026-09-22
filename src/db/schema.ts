@@ -1,16 +1,9 @@
 import { sql } from 'drizzle-orm';
-import { sqliteTable, text, integer, blob, primaryKey } from 'drizzle-orm/sqlite-core';
-import { createClient } from '@libsql/client';
-import { drizzle } from 'drizzle-orm/libsql';
-import { eq } from 'drizzle-orm';
-import { hashPassword } from '../utils/auth';
-import { generateUUID } from '../utils/auth';
-import { getDatabaseConfig } from '../config/database';
+import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
 
-// Database client setup
-const client = createClient(getDatabaseConfig());
-
-export const db = drizzle(client);
+// The database connection lives in config/database.ts; re-exported here so
+// consumers (and tests) can import db and tables from a single module.
+export { db } from '../config/database';
 
 export enum UserRole {
   ADMIN = 'admin',
@@ -132,31 +125,3 @@ export const notifications = sqliteTable('notifications', {
   relatedEntityId: text('related_entity_id').notNull(),
   ...timestampFields,
 });
-
-// Function to initialize the database
-export async function initializeDatabase() {
-  try {
-    // Check if admin user exists
-    const adminUser = await db.select().from(users).where(eq(users.email, 'admin@example.com')).limit(1);
-
-    if (adminUser.length === 0) {
-      // Create default admin user
-      const passwordHash = await hashPassword('admin123'); // Should be changed after first login
-      await db.insert(users).values({
-        id: generateUUID(),
-        email: 'admin@example.com',
-        passwordHash,
-        firstName: 'Admin',
-        lastName: 'User',
-        role: UserRole.ADMIN,
-        isActive: true,
-      });
-      console.log('Default admin user created');
-    }
-
-    console.log('Database initialized successfully');
-  } catch (error) {
-    console.error('Database initialization failed:', error);
-    throw error;
-  }
-}
