@@ -1,11 +1,17 @@
 import request from 'supertest';
 import app from '../src/app';
-import { db, users } from '../src/db/schema';
+import { db, users, quoteRequests, quotes, contracts, productionStatus, notifications } from '../src/db/schema';
 import { hashPassword } from '../src/utils/auth';
+import { eq } from 'drizzle-orm';
 
 describe('Authentication endpoints', () => {
   beforeEach(async () => {
-    // Clear users table before each test
+    // Clear tables (children first to satisfy foreign keys)
+    await db.delete(notifications);
+    await db.delete(productionStatus);
+    await db.delete(contracts);
+    await db.delete(quotes);
+    await db.delete(quoteRequests);
     await db.delete(users);
   });
 
@@ -168,7 +174,8 @@ describe('Authentication endpoints', () => {
         .set('Accept', 'application/vnd.api+json')
         .set('Content-Type', 'application/vnd.api+json');
 
-      expect(response.status).toBe(401);
+      // Valid credentials but the account is disabled
+      expect(response.status).toBe(403);
     });
   });
 

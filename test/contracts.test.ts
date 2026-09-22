@@ -1,6 +1,7 @@
 import request from 'supertest';
 import app from '../src/app';
-import { db, users, quoteRequests, quotes, contracts, products, materials, openingTypes, profileTypes, UserRole } from '../src/db/schema';
+import { eq } from 'drizzle-orm';
+import { db, users, quoteRequests, quotes, contracts, productionStatus, notifications, products, materials, openingTypes, profileTypes, UserRole } from '../src/db/schema';
 import { hashPassword, generateToken } from '../src/utils/auth';
 
 describe('Contracts endpoints', () => {
@@ -9,7 +10,9 @@ describe('Contracts endpoints', () => {
   let acceptedQuoteId: string;
 
   beforeEach(async () => {
-    // Clear relevant tables
+    // Clear relevant tables (children first to satisfy foreign keys)
+    await db.delete(notifications);
+    await db.delete(productionStatus);
     await db.delete(contracts);
     await db.delete(quotes);
     await db.delete(quoteRequests);

@@ -1,6 +1,6 @@
 import request from 'supertest';
 import app from '../src/app';
-import { db, users, quoteRequests, quotes, contracts, productionStatus, products, materials, openingTypes, profileTypes, UserRole } from '../src/db/schema';
+import { db, users, quoteRequests, quotes, contracts, productionStatus, notifications, products, materials, openingTypes, profileTypes, UserRole } from '../src/db/schema';
 import { hashPassword, generateToken } from '../src/utils/auth';
 
 describe('Production Status endpoints', () => {
@@ -9,7 +9,8 @@ describe('Production Status endpoints', () => {
   let signedContractId: string;
 
   beforeEach(async () => {
-    // Clear relevant tables
+    // Clear relevant tables (children first to satisfy foreign keys)
+    await db.delete(notifications);
     await db.delete(productionStatus);
     await db.delete(contracts);
     await db.delete(quotes);
